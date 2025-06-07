@@ -87,6 +87,7 @@ class PETRTransformer(BaseModule):
                 - memory: Output results from encoder, with shape \
                       [bs, embed_dims, h, w].
         """
+        # ----------把shape变形，适应 Transformer 输入-----------
         bs, n, c, h, w = x.shape
         memory = x.permute(1, 3, 4, 0, 2).reshape(-1, bs, c) # [bs, n, c, h, w] -> [n*h*w, bs, c]
         pos_embed = pos_embed.permute(1, 3, 4, 0, 2).reshape(-1, bs, c) # [bs, n, c, h, w] -> [n*h*w, bs, c]
@@ -149,14 +150,11 @@ class PETRDNTransformer(BaseModule):
     def forward(self, x, mask, query_embed, pos_embed, attn_masks=None, reg_branch=None):
         """Forward function for `Transformer`.
         Args:
-            x (Tensor): Input query with shape [bs, c, h, w] where
-                c = embed_dims.
-            mask (Tensor): The key_padding_mask used for encoder and decoder,
-                with shape [bs, h, w].
-            query_embed (Tensor): The query embedding for decoder, with shape
-                [num_query, c].
-            pos_embed (Tensor): The positional encoding for encoder and
-                decoder, with the same shape as `x`.
+                x: 特征图(B, N, C=256, H, W)
+                masks: 对应特征图的有效特征(B, N, H, W)
+                query_embeds: object query，用于生成解码器的初始查询的位置部分 [num_queries,embed_dims=256]
+                pos_embed: 对应特征图的位置编码 [B, N, 256, H, W]  
+                self.reg_branches:
         Returns:
             tuple[Tensor]: results of decoder containing the following tensor.
                 - out_dec: Output from decoder. If return_intermediate_dec \
@@ -167,11 +165,11 @@ class PETRDNTransformer(BaseModule):
                       [bs, embed_dims, h, w].
         """
         bs, n, c, h, w = x.shape
-        memory = x.permute(1, 3, 4, 0, 2).reshape(-1, bs, c) # [bs, n, c, h, w] -> [n*h*w, bs, c]
+        memory = x.permute(1, 3, 4, 0, 2).reshape(-1, bs, c) # [bs, n, c, h, w] -> [n*h*w, bs, c] 把特征图的shape更改为transformer的要求
         pos_embed = pos_embed.permute(1, 3, 4, 0, 2).reshape(-1, bs, c) # [bs, n, c, h, w] -> [n*h*w, bs, c]
         query_embed = query_embed.transpose(0, 1)  # [num_query, dim] -> [num_query, bs, dim]
         mask = mask.view(bs, -1)  # [bs, n, h, w] -> [bs, n*h*w]
-        target = torch.zeros_like(query_embed)
+        target = torch.zeros_like(query_embed) # 创建一个与 query_embed 形状完全相同的全零张量  [num_query, bs, embed_dims=256]
         # out_dec: [num_layers, num_query, bs, dim]
         out_dec = self.decoder(
             query=target,
@@ -183,7 +181,7 @@ class PETRDNTransformer(BaseModule):
             attn_masks=[attn_masks, None],
             reg_branch=reg_branch,
             )
-        out_dec = out_dec.transpose(1, 2)
+        out_dec = out_dec.transpose(1, 2)   # [num_layers, bs, num_query, dim]
         memory = memory.reshape(n, h, w, bs, c).permute(3, 0, 4, 1, 2)
         return  out_dec, memory
 
@@ -276,6 +274,7 @@ class PETRTransformerDecoderLayer(BaseTransformerLayer):
             Tensor: forwarded results with shape [num_query, bs, embed_dims].
         """
 
+        # 使用 checkpoint 包装 _forward 以节省显存
         if self.use_checkpoint and self.training:
             x = cp.checkpoint(
                 self._forward, 
@@ -416,9 +415,12 @@ class PETRMultiheadAttention(BaseModule):
                     warnings.warn(f'position encoding of key is'
                                   f'missing in {self.__class__.__name__}.')
         if query_pos is not None:
-            query = query + query_pos
+            # 将对象查询object query的内容部分与其对应的位置编码(经过pos2posemb3d+MLP)相加，形成最终的query输给注意力模块
+            query = query + query_pos   
         if key_pos is not None:
+            # 将backbone+FPN提取的图像特征与对应的3D位置感知编码相加(经过position_embeding生成coords_position_embeding)，形成最终的key
             key = key + key_pos
+        # value 也是图像特征，但是通常不直接与位置编码相加，它仅代表内容信息 
 
         # Because the dataflow('key', 'query', 'value') of
         # ``torch.nn.MultiheadAttention`` is (num_query, batch,
@@ -431,6 +433,11 @@ class PETRMultiheadAttention(BaseModule):
             key = key.transpose(0, 1)
             value = value.transpose(0, 1)
 
+        '''
+            query（对象查询）会去关注key（图像特征），并根据注意力权重从value（图像特征中聚合信息）。
+            由于key 已经融入了3D位置信息了（key_pos），这会使得query（对象查询）能够感知到图像特征在3D空间中的位置，
+            从而实现从2D图像特征到3D感知的转化。key_padding_mask 确保了注意力不会分配到无效的填充图像区域。
+        '''
         out = self.attn(
             query=query,
             key=key,
@@ -516,11 +523,13 @@ class PETRTransformerDecoder(TransformerLayerSequence):
 
         intermediate = []
         for layer in self.layers:
+            # query (num_query, B, C)
             query = layer(query, *args, **kwargs)
             if self.return_intermediate:
                 if self.post_norm is not None:
                     intermediate.append(self.post_norm(query))
                 else:
                     intermediate.append(query)
-        return torch.stack(intermediate)
+        # 中间层的输出被堆叠起来
+        return torch.stack(intermediate)    # (num_decoder_layers, num_query, B, C)
 

@@ -20,6 +20,8 @@ num_sweep = 5  ###nummber of sweep frames between two key frame
 
 # info_path = os.path.join(data_root,'nuscenes_infos_30f_infos_{}.pkl'.format(info_prefix))
 info_path = os.path.join(data_root,'mmdet3d_nuscenes_30f_infos_{}.pkl'.format(info_prefix))
+# 从一个预先存在的 .pkl 文件（例如 nuscenes_infos_train.pkl）加载基础的关键帧信息。
+# 这个文件通常是由 MMDetection3D 的数据转换脚本生成的，包含了每个关键帧的基本信息，如图片路径、自车位姿、传感器标定等。
 key_infos = pickle.load(open(os.path.join(data_root,'nuscenes_infos_{}.pkl'.format(info_prefix)), 'rb'))
 if info_prefix == 'test':
     nuscenes_version = 'v1.0-test'
@@ -28,25 +30,28 @@ else:
 nuscenes = NuScenes(nuscenes_version, data_root)
 
 def add_frame(sample_data, e2g_t, l2e_t, l2e_r_mat, e2g_r_mat):
+    #sample_data {'token': '8e25cfcd8f724bb7bbce69bff042a56f', 'sample_token': '02fd302178dd44568ae305320ea24054', 'ego_pose_token': '8e25cfcd8f724bb7bbce69bff042a56f', 'calibrated_sensor_token': '2fde3d3376ea42a8a561df595e001cc7', 'timestamp': 1533153859904816, 'fileformat': 'jpg', 'is_key_frame': True, 'height': 900, 'width': 1600, 'filename': 'samples/CAM_FRONT_LEFT/n008-2018-08-01-16-03-27-0400__CAM_FRONT_LEFT__1533153859904816.jpg', 'prev': '5d82f148ba8947579a6d7647ac73a9d6', 'next': 'cb0a1671873647faba28916a88b14574', 'sensor_modality': 'camera', 'channel': 'CAM_FRONT_LEFT'}
     sweep_cam = dict()
     sweep_cam['is_key_frame'] = sample_data['is_key_frame']
     sweep_cam['data_path'] = os.path.join(data_root, sample_data['filename'])
     sweep_cam['type'] = 'camera'
     sweep_cam['timestamp'] = sample_data['timestamp']
     sweep_cam['sample_data_token'] = sample_data['sample_token']
-    pose_record = nuscenes.get('ego_pose', sample_data['ego_pose_token']) ##{'token': '4367ec13cba845aab19cff4973eebc4a', 'timestamp': 1533153862354799, 'rotation': [0.014338564560080185, -0.005652165998640543, 0.023939306730068593, -0.9995946019157788], 'translation': [2365.4560154353267, 796.2968658597514, 0.0]}
-    calibrated_sensor_record = nuscenes.get('calibrated_sensor', sample_data['calibrated_sensor_token']) ##{'token': '2fde3d3376ea42a8a561df595e001cc7', 'sensor_token': 'ec4b5d41840a509984f7ec36419d4c09', 'translation': [1.5752559464, 0.500519383135, 1.50696032589], 'rotation': [0.6812088525125634, -0.6687507165046241, 0.2101702448905517, -0.21108161122114324], 'camera_intrinsic': [[1257.8625342125129, 0.0, 827.2410631095686], [0.0, 1257.8625342125129, 450.915498205774], [0.0, 0.0, 1.0]]}
+    # pose_record {'token': '4367ec13cba845aab19cff4973eebc4a', 'timestamp': 1533153862354799, 'rotation': [0.014338564560080185, -0.005652165998640543, 0.023939306730068593, -0.9995946019157788], 'translation': [2365.4560154353267, 796.2968658597514, 0.0]}
+    pose_record = nuscenes.get('ego_pose', sample_data['ego_pose_token']) 
+    # calibrated_sensor_record {'token': '2fde3d3376ea42a8a561df595e001cc7', 'sensor_token': 'ec4b5d41840a509984f7ec36419d4c09', 'translation': [1.5752559464, 0.500519383135, 1.50696032589], 'rotation': [0.6812088525125634, -0.6687507165046241, 0.2101702448905517, -0.21108161122114324], 'camera_intrinsic': [[1257.8625342125129, 0.0, 827.2410631095686], [0.0, 1257.8625342125129, 450.915498205774], [0.0, 0.0, 1.0]]}
+    calibrated_sensor_record = nuscenes.get('calibrated_sensor', sample_data['calibrated_sensor_token']) 
 
-    sweep_cam['ego2global_translation']  = pose_record['translation']
+    sweep_cam['ego2global_translation']  = pose_record['translation']  
     sweep_cam['ego2global_rotation']  = pose_record['rotation']
-    sweep_cam['sensor2ego_translation']  = calibrated_sensor_record['translation']
-    sweep_cam['sensor2ego_rotation']  = calibrated_sensor_record['rotation']
-    sweep_cam['cam_intrinsic'] = calibrated_sensor_record['camera_intrinsic']
+    sweep_cam['sensor2ego_translation']  = calibrated_sensor_record['translation']  
+    sweep_cam['sensor2ego_rotation']  = calibrated_sensor_record['rotation']    
+    sweep_cam['cam_intrinsic'] = calibrated_sensor_record['camera_intrinsic']   # 'camera_intrinsic': [[1257.8625342125129, 0.0, 827.2410631095686], [0.0, 1257.8625342125129, 450.915498205774], [0.0, 0.0, 1.0]]
 
-    l2e_r_s = sweep_cam['sensor2ego_rotation']
-    l2e_t_s = sweep_cam['sensor2ego_translation'] 
-    e2g_r_s = sweep_cam['ego2global_rotation']
-    e2g_t_s = sweep_cam['ego2global_translation'] 
+    l2e_r_s = sweep_cam['sensor2ego_rotation']  # 'rotation': [0.6812088525125634, -0.6687507165046241, 0.2101702448905517, -0.21108161122114324]
+    l2e_t_s = sweep_cam['sensor2ego_translation'] # 'translation': [1.5752559464, 0.500519383135, 1.50696032589]
+    e2g_r_s = sweep_cam['ego2global_rotation'] # 'rotation': [0.014338564560080185, -0.005652165998640543, 0.023939306730068593, -0.9995946019157788]
+    e2g_t_s = sweep_cam['ego2global_translation']  # 'translation': [2365.4560154353267, 796.2968658597514, 0.0]
 
     l2e_r_s_mat = Quaternion(l2e_r_s).rotation_matrix
     e2g_r_s_mat = Quaternion(e2g_r_s).rotation_matrix
@@ -77,23 +82,29 @@ def add_frame(sample_data, e2g_t, l2e_t, l2e_r_mat, e2g_r_mat):
 
     return sweep_cam
 
+'''
+    遍历所有关键帧。对于每一个关键帧，向后追溯一定数量的历史帧(包括关键帧和它们之间的扫描帧 sweeps)
+    计算这些历史帧的相机数据相对于当前正在处理的关键帧的位姿和标定参数
+    将这些信息组合起来，存储在 key_infos['infos'][current_id]['sweeps'] 中
+'''
 for current_id in tqdm.tqdm(range(len(key_infos['infos']))):
-    ###parameters of current key frame 
-    e2g_t = key_infos['infos'][current_id]['ego2global_translation']
-    e2g_r = key_infos['infos'][current_id]['ego2global_rotation']
-    l2e_t = key_infos['infos'][current_id]['lidar2ego_translation']
-    l2e_r = key_infos['infos'][current_id]['lidar2ego_rotation']
-    l2e_r_mat = Quaternion(l2e_r).rotation_matrix
+    ###parameters of current key frame      current_id 关键帧的索引！
+    e2g_t = key_infos['infos'][current_id]['ego2global_translation'] # 当前关键帧的自车(ego)到全局(global)坐标系的平移
+    e2g_r = key_infos['infos'][current_id]['ego2global_rotation']   # 当前关键帧的自车到全局坐标系的旋转矩阵
+    l2e_t = key_infos['infos'][current_id]['lidar2ego_translation'] # 当前关键帧的激光雷达(lidar)到自车(ego)坐标系的平移
+    l2e_r = key_infos['infos'][current_id]['lidar2ego_rotation']    # 当前关键帧的激光雷达到自车坐标系的旋转矩阵
+    # Quaternion函数四元数转换成旋转矩阵，方便做空间变换；.rotation_matrix是这个四元数对象的一个属性，返回对应的 3x3 的旋转矩阵。
+    l2e_r_mat = Quaternion(l2e_r).rotation_matrix  # 旋转矩阵
     e2g_r_mat = Quaternion(e2g_r).rotation_matrix
 
     sample = nuscenes.get('sample', key_infos['infos'][current_id]['token']) # {'token': 'c0be823ae8f040e2b3306002c571ae57', 'timestamp': 1533153861447131, 'prev': 'e866142822bb421d87d8f9bd1b91fbc3', 'next': 'f32d3a2842004926b41985152fa1bfad', 'scene_token': 'bc6a757d637f4832be68986833ec17ac', 'data': {'RADAR_FRONT': '85962dfd390843bab8cbedc9003a5d81', 'RADAR_FRONT_LEFT': '35e35910a6f8428ea1e3f71db59f0ed7', 'RADAR_FRONT_RIGHT': 'a557a223830d4f7db59a9bf03425c52d', 'RADAR_BACK_LEFT': '46b86e2060e341dabb14396a8edc1653', 'RADAR_BACK_RIGHT': '7e7b5ad41eff4f949d69b3ef6d65f991', 'LIDAR_TOP': '5a0aa6326b004322bf009388f4df33df', 'CAM_FRONT': 'a5c43d3424bd406ba1a0a3d1d1493277', 'CAM_FRONT_RIGHT': '38ee6078f2594c5cb3bea00956d3afeb', 'CAM_BACK_RIGHT': '082193ef4dff4dca9ff7af18493107f5', 'CAM_BACK': 'aec2027af4e243b591cf22459735644e', 'CAM_BACK_LEFT': 'd6c479b792674d8db1a5de86af2b9183', 'CAM_FRONT_LEFT': '451c4acac4534a0da20e652ba49a14a2'}, 'anns': []}
     current_cams = dict() ###cam of current key frame
-    for cam in sensors:
+    for cam in sensors: # sensors = ['CAM_FRONT', 'CAM_FRONT_RIGHT', ...]
         current_cams[cam] = nuscenes.get('sample_data', sample['data'][cam]) ##{'token': '8e25cfcd8f724bb7bbce69bff042a56f', 'sample_token': '02fd302178dd44568ae305320ea24054', 'ego_pose_token': '8e25cfcd8f724bb7bbce69bff042a56f', 'calibrated_sensor_token': '2fde3d3376ea42a8a561df595e001cc7', 'timestamp': 1533153859904816, 'fileformat': 'jpg', 'is_key_frame': True, 'height': 900, 'width': 1600, 'filename': 'samples/CAM_FRONT_LEFT/n008-2018-08-01-16-03-27-0400__CAM_FRONT_LEFT__1533153859904816.jpg', 'prev': '5d82f148ba8947579a6d7647ac73a9d6', 'next': 'cb0a1671873647faba28916a88b14574', 'sensor_modality': 'camera', 'channel': 'CAM_FRONT_LEFT'}
    
-    sweep_lists = []
-    for i in range(num_prev):  #### previous sweep frame  
-        ### justify the first frame of a scene
+    sweep_lists = []    # 用于收集所有相关的历史扫描帧信息
+    for i in range(num_prev):  # 追溯 num_prev=5 个历史关键帧（以及它们之间的sweep帧）
+        ### justify the first frame of a scene  当前 sample 已经是这个场景 (scene) 的第一帧了，没有更早的帧可以追溯，所以用 break 跳出外层循环。
         if sample['prev'] == '': 
             break
         ###add sweep frame between two key frame

@@ -80,9 +80,9 @@ class LoadMultiViewImageFromMultiSweepsFiles(object):
         sweep_imgs_list = []
         timestamp_imgs_list = []
         imgs = results['img']
-        img_timestamp = results['img_timestamp']
-        lidar_timestamp = results['timestamp']
-        img_timestamp = [lidar_timestamp - timestamp for timestamp in img_timestamp]
+        img_timestamp = results['img_timestamp']    # 获取图像时间戳
+        lidar_timestamp = results['timestamp']  # 获取激光雷达时间戳
+        img_timestamp = [lidar_timestamp - timestamp for timestamp in img_timestamp]  # 把图像时间戳变成 与当前帧 LiDAR 的差值      差值是正数：图像在 lidar 之前拍摄
         sweep_imgs_list.extend(imgs)
         timestamp_imgs_list.extend(img_timestamp)
         nums = len(imgs)
@@ -120,14 +120,16 @@ class LoadMultiViewImageFromMultiSweepsFiles(object):
                     sweep = results['sweeps'][sweep_idx - 1]
                 results['filename'].extend([sweep[sensor]['data_path'] for sensor in self.sensors])
 
-                img = np.stack([mmcv.imread(sweep[sensor]['data_path'], self.color_type) for sensor in self.sensors], axis=-1)
+                img = np.stack([mmcv.imread(sweep[sensor]['data_path'], self.color_type) for sensor in self.sensors], axis=-1)  # 拆成单张图（还原为6张图）
                 
                 if self.to_float32:
                     img = img.astype(np.float32)
                 img = [img[..., i] for i in range(img.shape[-1])]
                 sweep_imgs_list.extend(img)
+                # 计算每张 sweep 图和当前帧 lidar 时间戳的差值
                 sweep_ts = [lidar_timestamp - sweep[sensor]['timestamp'] / 1e6  for sensor in self.sensors]
                 timestamp_imgs_list.extend(sweep_ts)
+                # 同步相机标定矩阵
                 for sensor in self.sensors:
                     results['lidar2img'].append(sweep[sensor]['lidar2img'])
                     results['intrinsics'].append(sweep[sensor]['intrinsics'])

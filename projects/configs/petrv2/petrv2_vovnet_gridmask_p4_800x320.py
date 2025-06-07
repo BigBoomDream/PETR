@@ -29,7 +29,7 @@ model = dict(
     img_backbone=dict(
         type='VoVNetCP', ###use checkpoint to save memory
         spec_name='V-99-eSE',
-        norm_eval=True,
+        norm_eval=True,      # 在训练期间将BN层设置为评估模式（使用运行均值/方差）
         frozen_stages=-1,
         input_ch=3,
         out_features=('stage4','stage5',)),
@@ -43,7 +43,7 @@ model = dict(
         num_classes=10,
         in_channels=256,
         num_query=900,
-        LID=True,
+        LID=True,       # 线性递增离散化 (LID)
         with_position=True,
         with_multiview=True,
         with_fpe=True,
@@ -112,6 +112,7 @@ data_root = '/data/Dataset/nuScenes/'
 
 file_client_args = dict(backend='disk')
 
+# Database Sampler 数据增强方法，存储了训练集中的GT，然后在训练一个新场景时，随机挑出一些物体，把他们粘贴到当前正在处理的场景中
 db_sampler = dict(
     data_root=data_root,
     info_path=data_root + 'nuscenes_dbinfos_train.pkl',
@@ -147,6 +148,8 @@ db_sampler = dict(
         load_dim=5,
         use_dim=[0, 1, 2, 3, 4],
         file_client_args=file_client_args))
+
+
 ida_aug_conf = {
         "resize_lim": (0.47, 0.625),
         "final_dim": (320, 800),
@@ -156,6 +159,7 @@ ida_aug_conf = {
         "W": 1600,
         "rand_flip": True,
     }
+
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
     dict(type='LoadMultiViewImageFromMultiSweepsFiles', sweeps_num=1, to_float32=True, pad_empty_sweeps=True, test_mode=False, sweep_range=[3,27]),

@@ -26,18 +26,22 @@ import numpy as np
 from mmcv.cnn import xavier_init, constant_init, kaiming_init
 import math
 from mmdet.models.utils import NormedLinear
+
+
 def pos2posemb3d(pos, num_pos_feats=128, temperature=10000):
-    scale = 2 * math.pi
-    pos = pos * scale
-    dim_t = torch.arange(num_pos_feats, dtype=torch.float32, device=pos.device)
+    # self.reference_points = nn.Embedding(self.num_query, 3)  num_query=900
+    # pos = self.reference_points.weight  (900,3)
+    scale = 2 * math.pi # 缩放因子，通常是 2π。 因为正弦和余弦函数的周期是 2π。将输入坐标乘以这个因子，可以使后续在应用三角函数时，坐标的变换能在一个或多个周期内体现
+    pos = pos * scale # 输入的原始坐标pos(900,3) 的每个分量（x, y, z）乘以 scale；是为了将坐标映射到一个更适合三角函数编码的范围。如果原始坐标是归一化到[0,1]的，那乘以 2π 后就映射到了 [0, 2*pi] 区间
+    dim_t = torch.arange(num_pos_feats, dtype=torch.float32, device=pos.device) # [0., 1., ..., 127.]
     dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats)
-    pos_x = pos[..., 0, None] / dim_t
-    pos_y = pos[..., 1, None] / dim_t
+    pos_x = pos[..., 0, None] / dim_t   # [num_queries, 128]
+    pos_y = pos[..., 1, None] / dim_t   
     pos_z = pos[..., 2, None] / dim_t
-    pos_x = torch.stack((pos_x[..., 0::2].sin(), pos_x[..., 1::2].cos()), dim=-1).flatten(-2)
+    pos_x = torch.stack((pos_x[..., 0::2].sin(), pos_x[..., 1::2].cos()), dim=-1).flatten(-2)   # [num_queries, 128]
     pos_y = torch.stack((pos_y[..., 0::2].sin(), pos_y[..., 1::2].cos()), dim=-1).flatten(-2)
     pos_z = torch.stack((pos_z[..., 0::2].sin(), pos_z[..., 1::2].cos()), dim=-1).flatten(-2)
-    posemb = torch.cat((pos_y, pos_x, pos_z), dim=-1)
+    posemb = torch.cat((pos_y, pos_x, pos_z), dim=-1)   # 三个坐标维度（y, x, z） [num_queries, 128*3=384]
     return posemb
 
 @HEADS.register_module()
@@ -170,11 +174,11 @@ class PETRHead(AnchorFreeHead):
         self.fp16_enabled = False
         self.embed_dims = 256
         self.depth_step = depth_step
-        self.depth_num = depth_num
+        self.depth_num = depth_num  # 64
         self.position_dim = 3 * self.depth_num
-        self.position_range = position_range
-        self.LID = LID
-        self.depth_start = depth_start
+        self.position_range = position_range    # position_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
+        self.LID = LID  # 线性递增离散化 (LID)
+        self.depth_start = depth_start  # 1
         self.position_level = 0
         self.with_position = with_position
         self.with_multiview = with_multiview
@@ -257,7 +261,7 @@ class PETRHead(AnchorFreeHead):
 
         if self.with_position:
             self.position_encoder = nn.Sequential(
-                nn.Conv2d(self.position_dim, self.embed_dims*4, kernel_size=1, stride=1, padding=0),
+                nn.Conv2d(self.position_dim, self.embed_dims*4, kernel_size=1, stride=1, padding=0),    # self.position_dim = 3 * self.depth_num(64)=192   self.embed_dims = 256
                 nn.ReLU(),
                 nn.Conv2d(self.embed_dims*4, self.embed_dims, kernel_size=1, stride=1, padding=0),
             )
@@ -280,51 +284,138 @@ class PETRHead(AnchorFreeHead):
                 nn.init.constant_(m[-1].bias, bias_init)
 
     def position_embeding(self, img_feats, img_metas, masks=None):
+        '''
+            输入的参数：
+                img_feats, 经过backbone+fpn之后的多尺度特征
+                img_metas,  
+                masks 告诉模型哪些区域是图像的有效内容 (值为0)，哪些是填充区域 (值为1，应该被忽略)。
+        '''
         eps = 1e-5
         pad_h, pad_w, _ = img_metas[0]['pad_shape'][0]
-        B, N, C, H, W = img_feats[self.position_level].shape
-        coords_h = torch.arange(H, device=img_feats[0].device).float() * pad_h / H
-        coords_w = torch.arange(W, device=img_feats[0].device).float() * pad_w / W
+        B, N, C, H, W = img_feats[self.position_level].shape    # self.position_level = 0    
+        coords_h = torch.arange(H, device=img_feats[0].device).float() * pad_h / H      #  pad_h 填充的目的是能被32整除，因此pad_h可能比原图片尺寸要大， 
+        coords_w = torch.arange(W, device=img_feats[0].device).float() * pad_w / W      #  pad_w / W 就是计算采样了多少层，这里应该是1/16
+        '''
+            原图(1600*900)
+            填充图像 (1632 × 928):
+            ┌─────────────────────────────┐
+            │ ● ● ● ● ● ● ● ● ● ● ● ● ● ●│  像素级密集采样
+            │ ● ● ● ● ● ● ● ● ● ● ● ● ● ●│
+            │ ● ● ● ● ● ● ● ● ● ● ● ● ● ●│
+            └─────────────────────────────┘
 
-        if self.LID:
-            index  = torch.arange(start=0, end=self.depth_num, step=1, device=img_feats[0].device).float()
-            index_1 = index + 1
-            bin_size = (self.position_range[3] - self.depth_start) / (self.depth_num * (1 + self.depth_num))
+            特征图 (408×232):
+            ┌───────────────┐
+            │ ▲   ▲   ▲   ▲ │  每4个像素一个特征点
+            │               │
+            │ ▲   ▲   ▲   ▲ │
+            └───────────────┘
+
+            coords_h, coords_w 建立映射关系:
+            特征图位置 (0,0) → 原图位置 (0,0)
+            特征图位置 (1,1) → 原图位置 (4,4)  
+            特征图位置 (2,2) → 原图位置 (8,8)
+        '''
+
+        if self.LID:    # 线性递增离散化 (LID)
+            #  self.depth_num = depth_num  # depth_num = 64          
+            index  = torch.arange(start=0, end=self.depth_num, step=1, device=img_feats[0].device).float()  # index = [0, 1, 2, 3, ..., 63]      # 64个索引
+            index_1 = index + 1              # index_1 = [1, 2, 3, 4, ..., 64]    
+            # position_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
+            # self.depth_start = depth_start  # depth_start = 1
+            bin_size = (self.position_range[3] - self.depth_start) / (self.depth_num * (1 + self.depth_num))    # bin_size = (61.2 - 1) / (64 * (1 + 64)) = ≈ 0.0145
+            '''
+                        计算深度值（非线性分布）
+                coords_d[0] = 1 + 0.0145 * 0 * 1 = 1.000
+                coords_d[1] = 1 + 0.0145 * 1 * 2 = 1.029  
+                coords_d[2] = 1 + 0.0145 * 2 * 3 = 1.087
+                coords_d[3] = 1 + 0.0145 * 3 * 4 = 1.174
+                ...
+                coords_d[63] = 1 + 0.0145 * 63 * 64 ≈ 59.2
+
+                深度  1m    2m    5m    10m   20m   40m   60m
+                密度  |||||  ||||   |||    ||     |     |    |
+            '''
             coords_d = self.depth_start + bin_size * index * index_1
-        else:
+        else: # 均匀分布
             index  = torch.arange(start=0, end=self.depth_num, step=1, device=img_feats[0].device).float()
-            bin_size = (self.position_range[3] - self.depth_start) / self.depth_num
-            coords_d = self.depth_start + bin_size * index
+            bin_size = (self.position_range[3] - self.depth_start) / self.depth_num         # bin_size = (61.2 - 1) / 64 = 60.2 / 64 ≈ 0.941
+            '''
+                         均匀分布
+                    coords_d[0] = 1 + 0.941 * 0 = 1.000
+                    coords_d[1] = 1 + 0.941 * 1 = 1.941
+                    coords_d[2] = 1 + 0.941 * 2 = 2.882
+                    coords_d[3] = 1 + 0.941 * 3 = 3.823
+                    ...
+                    coords_d[63] = 1 + 0.941 * 63 ≈ 60.3
+            '''
+            coords_d = self.depth_start + bin_size * index  
 
-        D = coords_d.shape[0]
-        coords = torch.stack(torch.meshgrid([coords_w, coords_h, coords_d])).permute(1, 2, 3, 0) # W, H, D, 3
-        coords = torch.cat((coords, torch.ones_like(coords[..., :1])), -1)
-        coords[..., :2] = coords[..., :2] * torch.maximum(coords[..., 2:3], torch.ones_like(coords[..., 2:3])*eps)
 
+        D = coords_d.shape[0]   # D = 64
+
+        '''
+            coords_w.shape = [w]  # 宽度方向坐标
+            coords_h.shape = [h]  # 高度方向坐标  
+            coords_d.shape = [d]   # 深度方向坐标
+            meshgrid生成3D网格: meshgrid_result = torch.meshgrid([coords_w, coords_h, coords_d]) # 结果是3个张量，每个形状为 [232, 408, 64]
+            stack后形状变为 [3, W, H, D]   permute(1,2,3,0)后变为 [W, H, D, 3]
+            coords.shape = [W, H, D, 3]  # 每个位置存储(x, y, z)坐标
+        '''
+        coords = torch.stack(torch.meshgrid([coords_w, coords_h, coords_d])).permute(1, 2, 3, 0) # W, H, D, 3  总共采样了w*h*d个3D采样点
+        
+        # 从 [W, H, D, 3] 变为 [W, H, D, 4]，齐次坐标； 每个点从 (x, y, z) 变为 (x, y, z, 1)
+        coords = torch.cat((coords, torch.ones_like(coords[..., :1])), -1)      # [W, H, D, 4]
+        # 透视投影校正：近处的点：深度z较小，x,y坐标几乎不变；   远处的点：深度z较大，x,y坐标按比例放大
+        coords[..., :2] = coords[..., :2] * torch.maximum(coords[..., 2:3], torch.ones_like(coords[..., 2:3])*eps)  # 刚好和DETR3d里面的消除透视反过来
+        
+        # --- 构建 图像-> 世界坐标系的逆变换矩阵 ----
         img2lidars = []
         for img_meta in img_metas:
             img2lidar = []
             for i in range(len(img_meta['lidar2img'])):
-                img2lidar.append(np.linalg.inv(img_meta['lidar2img'][i]))
+                # np.linalg.inv 用于计算矩阵的逆的函数
+                img2lidar.append(np.linalg.inv(img_meta['lidar2img'][i]))   # 通过求逆矩阵得到 img2lidar
             img2lidars.append(np.asarray(img2lidar))
         img2lidars = np.asarray(img2lidars)
-        img2lidars = coords.new_tensor(img2lidars) # (B, N, 4, 4)
+        img2lidars = coords.new_tensor(img2lidars) # (B, N, 4, 4)   # 将NumPy数组转换为PyTorch张量，并确保与coords张量具有相同的设备位置和数据类型。
 
-        coords = coords.view(1, 1, W, H, D, 4, 1).repeat(B, N, 1, 1, 1, 1, 1)
-        img2lidars = img2lidars.view(B, N, 1, 1, 1, 4, 4).repeat(1, 1, W, H, D, 1, 1)
-        coords3d = torch.matmul(img2lidars, coords).squeeze(-1)[..., :3]
+        # --- 反投影到世界坐标系下，然后归一化坐标 ----
+        coords = coords.view(1, 1, W, H, D, 4, 1).repeat(B, N, 1, 1, 1, 1, 1)   # [B, N=6, W, H, D=64, 4, 1]
+        img2lidars = img2lidars.view(B, N, 1, 1, 1, 4, 4).repeat(1, 1, W, H, D, 1, 1)   # [B, N=6, W, H, D=64, 4, 4]
+        '''
+            对每个图像像素进行坐标转换
+            img2lidars: [B, N, W, H, D, 4, 4]
+            coords:     [B, N, W, H, D, 4, 1]
+            结果:       [B, N, W, H, D, 4, 1]
+         squeeze(-1)[..., :3] 移除最后一维并只保留(X,Y,Z)  coords3d.shape = [B, N, W, H, D, 3]
+        '''
+        coords3d = torch.matmul(img2lidars, coords).squeeze(-1)[..., :3]    # [B, N, W, H, D, 3]
+        # 归一化：原始坐标: (X=30.6, Y=-30.6, Z=5.0)    归一化后: (X=0.75, Y=0.25, Z=0.75)   [B, N, W, H, D, 3]
         coords3d[..., 0:1] = (coords3d[..., 0:1] - self.position_range[0]) / (self.position_range[3] - self.position_range[0])
         coords3d[..., 1:2] = (coords3d[..., 1:2] - self.position_range[1]) / (self.position_range[4] - self.position_range[1])
         coords3d[..., 2:3] = (coords3d[..., 2:3] - self.position_range[2]) / (self.position_range[5] - self.position_range[2])
 
-        coords_mask = (coords3d > 1.0) | (coords3d < 0.0) 
-        coords_mask = coords_mask.flatten(-2).sum(-1) > (D * 0.5)
-        coords_mask = masks | coords_mask.permute(0, 1, 3, 2)
-        coords3d = coords3d.permute(0, 1, 4, 5, 3, 2).contiguous().view(B*N, -1, H, W)
-        coords3d = inverse_sigmoid(coords3d)
-        coords_position_embeding = self.position_encoder(coords3d)
+        # --- 掩码生成 ----
+        coords_mask = (coords3d > 1.0) | (coords3d < 0.0)   # [B, N, W, H, D, 3]
+        # 如果一个(B,N,W,H)位置，其在所有D=64个深度上的3个坐标(x,y,z)中，有一半以上的坐标值超出了[0,1]的范围，
+        # 那么就认为这个(B,N,W,H)位置的3D信息大部分是无效的。
+        coords_mask = coords_mask.flatten(-2).sum(-1) > (D * 0.5)   # [B, N, W, H, D, 3] → [B, N, W, H]
+        coords_mask = masks | coords_mask.permute(0, 1, 3, 2)   # 逻辑或：只要一个像素在2D图像上是填充，或者它对应的3D点大部分超出了范围，那么它对应的位置嵌入就应该被标记为无效。   得到[B, N, H, W]
+
+        # --- 生成位置编码 ----
+        coords3d = coords3d.permute(0, 1, 4, 5, 3, 2).contiguous().view(B*N, -1, H, W)  #  [B, N, W, H, D, 3] → [B, N, D, 3, H, W] → [B*N, D*3, H, W]
+        coords3d = inverse_sigmoid(coords3d) # 为了让后续的 position_encoder能够更有效地学习和编码这些位置信息，避免因 sigmoid 函数的饱和区导致的梯度消失问题，从而提高模型学习的稳定性和效率。    [B*N, D*3, H, W]
+        '''
+            self.position_encoder = nn.Sequential(
+                    nn.Conv2d(self.position_dim, self.embed_dims*4, kernel_size=1, stride=1, padding=0),    # self.position_dim = 3 * self.depth_num(64)=3*D   self.embed_dims = 256
+                    nn.ReLU(),
+                    nn.Conv2d(self.embed_dims*4, self.embed_dims, kernel_size=1, stride=1, padding=0),
+                )
+        '''
+        coords_position_embeding = self.position_encoder(coords3d)  # [B*N, D*3, H, W] ->  [B*N, embed_dims=256, H, W] 
         
-        return coords_position_embeding.view(B, N, self.embed_dims, H, W), coords_mask
+        return coords_position_embeding.view(B, N, self.embed_dims, H, W), coords_mask  # [B*N, embed_dims=256, H, W] -> (B, N, embed_dims=256, H, W)
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
@@ -370,30 +461,58 @@ class PETRHead(AnchorFreeHead):
                 head with normalized coordinate format (cx, cy, w, l, cz, h, theta, vx, vy). \
                 Shape [nb_dec, bs, num_query, 9].
         """
+         
+        x = mlvl_feats[0]   # mlvl_feats是一个列表，取这个列表的第一个(还是个列表)
+        batch_size, num_cams = x.size(0), x.size(1) # x 经过backbone+fpn之后的一层特征 (B, N, C=256, H, W)
+        input_img_h, input_img_w, _ = img_metas[0]['pad_shape'][0]      # 经过数据增强后的，且经过了backbone+fpn产生的特征图的宽、高【有填充的区域】
         
-        x = mlvl_feats[0]
-        batch_size, num_cams = x.size(0), x.size(1)
-        input_img_h, input_img_w, _ = img_metas[0]['pad_shape'][0]
-        masks = x.new_ones(
-            (batch_size, num_cams, input_img_h, input_img_w))
+        '''
+            假设填充后的图像是 800x600，但原始有效图像区域是 720x540。
+            那么 masks 中 [:720, :540] 的区域会是0，其余部分是1。
+            有效区域mask值为 0 ，无效区域为 1
+        '''
+        masks = x.new_ones( 
+            (batch_size, num_cams, input_img_h, input_img_w))   # masks 全1的tensor
         for img_id in range(batch_size):
             for cam_id in range(num_cams):
-                img_h, img_w, _ = img_metas[img_id]['img_shape'][cam_id]
+                img_h, img_w, _ = img_metas[img_id]['img_shape'][cam_id]    # 没有填充之前的图像尺寸，也就是真实的图片尺寸，是有效区域的；
+                # 一张图片实际是 800×1200，但为了统一输入尺寸被 padding 成了 832×1216，那么 pad 的区域就不是有效图像。
                 masks[img_id, cam_id, :img_h, :img_w] = 0
-        x = self.input_proj(x.flatten(0,1))
-        x = x.view(batch_size, num_cams, *x.shape[-3:])
-        # interpolate masks to have the same spatial shape with x
-        masks = F.interpolate(
-            masks, size=x.shape[-2:]).to(torch.bool)
 
-        if self.with_position:
-            coords_position_embeding, _ = self.position_embeding(mlvl_feats, img_metas, masks)
-            pos_embed = coords_position_embeding
-            if self.with_multiview:
-                sin_embed = self.positional_encoding(masks)
-                sin_embed = self.adapt_pos3d(sin_embed.flatten(0, 1)).view(x.size())
-                pos_embed = pos_embed + sin_embed
-            else:
+        # self.input_proj = Conv2d(self.in_channels, self.embed_dims, kernel_size=1)        
+        x = self.input_proj(x.flatten(0,1)) # flatten(0,1) 将 (B, N, C, H, W) 的特征图展平成 (B*N, C, H, W)，这样可以一次性通过一个2D卷积层。得到(B×N, C, H, W)
+        x = x.view(batch_size, num_cams, *x.shape[-3:])     #  (B, N, embed_dims, H, W)
+
+        # interpolate masks to have the same spatial shape with x   
+        # 让 mask 与 feature map 对齐
+        #    原因：Transformer 的注意力机制是在特征图 x_feat 上操作的。
+        #          为了让 Transformer 忽略掉那些由原始图像填充区域产生的无效特征，
+        #          我们需要一个与 x_feat 空间维度完全对应的掩码。
+        masks = F.interpolate(
+            masks, size=x.shape[-2:]).to(torch.bool)    
+
+        # --- ✳✳✳✳✳✳✳✳✳✳✳✳ 生成3D位置嵌入 ✳✳✳✳✳✳✳✳✳✳✳✳✳✳✳✳ ---
+        if self.with_position:  # 表示显式使用3D位置信息来生成位置感知特征
+            coords_position_embeding, _ = self.position_embeding(mlvl_feats, img_metas, masks)  # coords_position_embeding (B, N, embed_dims=256, H, W)
+            pos_embed = coords_position_embeding    # (B, N, embed_dims=256, H, W)
+            if self.with_multiview: # with_multiview为true  （多视图统一处理）
+                # 直接对所有视图处理 
+                # positional_encoding在配置文件中有，projects/mmdet3d_plugin/models/utils/positional_encoding.py
+                # sin_embed (batch_size, num_cams, 3 * num_feats, H_feat, W_feat)
+                sin_embed = self.positional_encoding(masks) # mask标记特征图的有效图像内容，基于mask生成2D位置编码  [B, N, H, W] -> sin_embed [B, N, embed_dims*3//2, H, W]
+                '''
+                        self.adapt_pos3d = nn.Sequential(
+                            nn.Conv2d(self.embed_dims*3//2 = 384, self.embed_dims*4 = 1024, kernel_size=1, stride=1, padding=0),
+                            nn.ReLU(),
+                            nn.Conv2d(self.embed_dims*4, self.embed_dims, kernel_size=1, stride=1, padding=0),
+                        )
+                '''
+                # sin_embed.flatten(0, 1)   [B*N, embed_dims*3//2 = 384, H, W] -> [B*N, 256, H, W] -> [B, N, 256, H, W]
+                # 通过 adapt_pos3d 将2D编码映射到与3D编码相同的维度空间
+                sin_embed = self.adapt_pos3d(sin_embed.flatten(0, 1)).view(x.size())        #  [B, N, 256, H, W]  
+                pos_embed = pos_embed + sin_embed   # 3D + 2D 位置编码  [B, N, 256, H, W]  
+            else:   
+                # with_multiview = False（逐相机处理）
                 pos_embeds = []
                 for i in range(num_cams):
                     xy_embed = self.positional_encoding(masks[:, i, :, :])
@@ -412,19 +531,36 @@ class PETRHead(AnchorFreeHead):
                     pos_embeds.append(pos_embed.unsqueeze(1))
                 pos_embed = torch.cat(pos_embeds, 1)
 
+        # self.reference_points = nn.Embedding(self.num_query, 3)  num_query=900
         reference_points = self.reference_points.weight
-        query_embeds = self.query_embedding(pos2posemb3d(reference_points))
-        reference_points = reference_points.unsqueeze(0).repeat(batch_size, 1, 1) #.sigmoid()
+        '''
+            self.query_embedding = nn.Sequential(
+                nn.Linear(self.embed_dims*3//2 = 384, self.embed_dims = 256),
+                nn.ReLU(),
+                nn.Linear(self.embed_dims, self.embed_dims),
+            )
+        '''
+        # pos2posemb3d(reference_points) [num_queries, 128*3=384] -> query_embeds [num_queries,embed_dims=256]
+        query_embeds = self.query_embedding(pos2posemb3d(reference_points))     # [num_queries,embed_dims=256]
+        reference_points = reference_points.unsqueeze(0).repeat(batch_size, 1, 1)   #.sigmoid()   [batch_size, num_query, 3]
 
-        outs_dec, _ = self.transformer(x, masks, query_embeds, pos_embed, self.reg_branches)
-        outs_dec = torch.nan_to_num(outs_dec)
+        '''
+            x: 特征图(B, N, C=256, H, W)
+            masks: 对应特征图的有效特征(B, N, H, W)
+            query_embeds: object query，用于生成解码器的初始查询的位置部分 [num_queries,embed_dims=256]
+            pos_embed: 对应特征图的位置编码 [B, N, 256, H, W]  
+            self.reg_branches:
+        '''
+        outs_dec, _ = self.transformer(x, masks, query_embeds, pos_embed, self.reg_branches) # [num_layers, bs, num_query, dim]
+        outs_dec = torch.nan_to_num(outs_dec)   # [num_layers, bs, num_query, dim]
         outputs_classes = []
         outputs_coords = []
         for lvl in range(outs_dec.shape[0]):
-            reference = inverse_sigmoid(reference_points.clone())
+            # reference_points作为当前层的初始参考点
+            reference = inverse_sigmoid(reference_points.clone())  # (B, num_query, 3)
             assert reference.shape[-1] == 3
-            outputs_class = self.cls_branches[lvl](outs_dec[lvl])
-            tmp = self.reg_branches[lvl](outs_dec[lvl])
+            outputs_class = self.cls_branches[lvl](outs_dec[lvl])  # (B, num_query, num_classes+1)
+            tmp = self.reg_branches[lvl](outs_dec[lvl])     # (B, num_query, code_size)
 
             tmp[..., 0:2] += reference[..., 0:2]
             tmp[..., 0:2] = tmp[..., 0:2].sigmoid()
@@ -432,19 +568,22 @@ class PETRHead(AnchorFreeHead):
             tmp[..., 4:5] = tmp[..., 4:5].sigmoid()
 
             outputs_coord = tmp
-            outputs_classes.append(outputs_class)
-            outputs_coords.append(outputs_coord)
+            outputs_classes.append(outputs_class)   
+            outputs_coords.append(outputs_coord)   
 
-        all_cls_scores = torch.stack(outputs_classes)
-        all_bbox_preds = torch.stack(outputs_coords)
+        all_cls_scores = torch.stack(outputs_classes)   # (num_layers, B, num_query, num_classes+1)
+        all_bbox_preds = torch.stack(outputs_coords)    # (num_layers, B, num_query, code_size)
 
+        # === 将归一化的边界框预测反归一化到实际物理尺度 ===
+        # pc_range: [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
+        # all_bbox_preds[..., 0:1] 是中心点 x 坐标 (cx)
         all_bbox_preds[..., 0:1] = (all_bbox_preds[..., 0:1] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0])
         all_bbox_preds[..., 1:2] = (all_bbox_preds[..., 1:2] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1])
         all_bbox_preds[..., 4:5] = (all_bbox_preds[..., 4:5] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2])
 
         outs = {
-            'all_cls_scores': all_cls_scores,
-            'all_bbox_preds': all_bbox_preds,
+            'all_cls_scores': all_cls_scores,   # (num_layers, B, num_query, num_classes+1)
+            'all_bbox_preds': all_bbox_preds,   # (num_layers, B, num_query, code_size)
             'enc_cls_scores': None,
             'enc_bbox_preds': None, 
         }

@@ -109,7 +109,17 @@ class Petr3D(MVXTwoStageDetector):
             dict: Losses of each branch.
         """
         outs = self.pts_bbox_head(pts_feats, img_metas)
+        '''
+            outs = {
+                'all_cls_scores': all_cls_scores,   # (num_layers, B, num_query, num_classes+1)
+                'all_bbox_preds': all_bbox_preds,   # (num_layers, B, num_query, code_size)
+                'enc_cls_scores': None,
+                'enc_bbox_preds': None, 
+            }
+        '''
+
         loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
+
         losses = self.pts_bbox_head.loss(*loss_inputs)
 
         return losses

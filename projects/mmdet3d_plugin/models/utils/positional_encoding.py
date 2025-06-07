@@ -16,6 +16,7 @@ class SinePositionalEncoding3D(BaseModule):
     """Position encoding with sine and cosine functions.
     See `End-to-End Object Detection with Transformers
     <https://arxiv.org/pdf/2005.12872>`_ for details.
+    借鉴最初在 Transformer 论文 "Attention Is All You Need" 中提出的正弦和余弦位置编码方法，并将其扩展到三维
     Args:
         num_feats (int): The feature dimension for each position
             along x-axis or y-axis. Note the final returned dimension
@@ -36,19 +37,27 @@ class SinePositionalEncoding3D(BaseModule):
     """
 
     def __init__(self,
-                 num_feats,
-                 temperature=10000,
-                 normalize=False,
-                 scale=2 * math.pi,
+                 num_feats,     # num_feats=128  --配置文件  每个位置维度（例如x, y, z, 或者视图N, H, W）的特征数量
+                 temperature=10000, # 温度参数，用于缩放位置嵌入
+                 normalize=False,   # normalize=True
+                 scale=2 * math.pi, # 归一化时使用的缩放因子
                  eps=1e-6,
-                 offset=0.,
+                 offset=0.,         # 归一化时添加的偏移量
                  init_cfg=None):
         super(SinePositionalEncoding3D, self).__init__(init_cfg)
         if normalize:
             assert isinstance(scale, (float, int)), 'when normalize is set,' \
                 'scale should be provided and in float or int type, ' \
                 f'found {type(scale)}'
-        self.num_feats = num_feats
+        '''
+            num_feats: 这个参数非常重要。它指定了沿着每个独立的空间维度（例如，在图像特征中，可以认为是“视图N轴”、“高度H轴”、“宽度W轴”）
+            用于编码位置的特征数量。需要注意的是，由于正弦和余弦函数成对使用，
+            所以对于每个维度，最终输出的特征维度实际上是 num_feats。
+            如果我们要编码三个维度（如N, H, W），并且希望最终每个空间点的总位置编码维度是 embed_dims，
+            那么 num_feats 通常会被设置为 embed_dims / (2 * 3)（如果是3D坐标x,y,z）或 embed_dims / (2 * num_dimensions_to_encode)。在
+            PETR的配置中，num_feats=128，而 embed_dims=256
+        '''
+        self.num_feats = num_feats  
         self.temperature = temperature
         self.normalize = normalize
         self.scale = scale
